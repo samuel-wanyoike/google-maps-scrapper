@@ -19,6 +19,8 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
 
+import pandas as pd
+
 import httpx
 from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeout
 
@@ -81,11 +83,44 @@ async def extract_email_from_website(url: str, timeout: int = 10) -> str:
 # ─────────────────────────────────────────────
 
 class GoogleMapsScraper:
-    MAPS_URL = "https://www.google.com/maps/search/{query}"
+    MAPS_URL = "https://www.google.com/maps/search/{query}?hl=en&gl=us"
 
     def __init__(self, headless: bool = True, slow_mo: int = 0):
         self.headless = headless
         self.slow_mo = slow_mo
+
+    @staticmethod
+    def _strip_label_prefix(value: str) -> str:
+        if not value:
+            return ""
+        return re.sub(r"^[^:]+:\s*", "", value).strip()
+
+    @staticmethod
+    def _translate_category(category: str) -> str:
+        """Translate common Swahili category terms to English."""
+        translations = {
+            "Ghorofa yenye Vyumba": "Apartments",
+            "Mafundi": "Contractors",
+            "Maduka": "Shops",
+            "Hoteli": "Hotels",
+            "Migahawa": "Restaurants",
+            "Hospitali": "Hospitals",
+            "Shule": "Schools",
+            "Benki": "Banks",
+            "Kituo cha posta": "Post Office",
+            "Kituo cha polisi": "Police Station",
+            "Jumba la biashara": "Commercial Building",
+            "Ofisi": "Office",
+            "Maktaba": "Library",
+            "Kituo cha afya": "Health Center",
+            "Kituo cha michezo": "Sports Center",
+            "Duka la vifaa": "Hardware Store",
+            "Duka la chakula": "Grocery Store",
+            "Kituo cha mafuta": "Gas Station",
+            "Kituo cha usafiri": "Transportation Hub",
+            "Kituo cha burudani": "Entertainment Center",
+        }
+        return translations.get(category.strip(), category.strip())
 
     async def _scroll_results(self, page: Page, max_results: int):
         """Scroll the results panel to load more listings."""
@@ -124,6 +159,7 @@ class GoogleMapsScraper:
         # Category
         try:
             data["category"] = await page.locator('button[jsaction*="category"]').first.inner_text(timeout=2000)
+            data["category"] = self._translate_category(data["category"])
         except PlaywrightTimeout:
             data["category"] = ""
 
@@ -131,7 +167,7 @@ class GoogleMapsScraper:
         try:
             addr_el = page.locator('[data-item-id="address"]')
             data["address"] = await addr_el.get_attribute("aria-label", timeout=2000) or ""
-            data["address"] = data["address"].replace("Address: ", "")
+            data["address"] = self._strip_label_prefix(data["address"])
         except PlaywrightTimeout:
             data["address"] = ""
 
@@ -139,7 +175,7 @@ class GoogleMapsScraper:
         try:
             phone_el = page.locator('[data-item-id^="phone:tel:"]')
             data["phone"] = await phone_el.get_attribute("aria-label", timeout=2000) or ""
-            data["phone"] = data["phone"].replace("Phone: ", "")
+            data["phone"] = self._strip_label_prefix(data["phone"])
         except PlaywrightTimeout:
             data["phone"] = ""
 
@@ -260,6 +296,55 @@ def save_csv(results: list[Property], path: str, append_if_exists: bool = True):
     print(f"\n💾 Saved {len(rows_to_write)} new records → {path}")
 
 
+def save_excel(results: list[Property], path: str, append_if_exists: bool = True):
+    if not results:
+        print("⚠  No results to save.")
+        return
+
+    output_path = Path(path)
+    rows = [asdict(result) for result in results]
+    df = pd.DataFrame(rows)
+
+    existing_urls = set()
+    if append_if_exists and output_path.exists():
+        existing_df = pd.read_excel(output_path, engine="openpyxl")
+        existing_urls = {
+            str(value).strip()
+            for value in existing_df.get("maps_url", pd.Series(dtype="string")).fillna("")
+            if str(value).strip()
+        }
+
+    rows_to_write = []
+    seen_urls = set(existing_urls)
+    for row in rows:
+        url = str(row.get("maps_url", "")).strip()
+        if not url or url in seen_urls:
+            continue
+        rows_to_write.append(row)
+        seen_urls.add(url)
+
+    if not rows_to_write:
+        print("⚠  No new records to save; existing file already contains these listings.")
+        return
+
+    if output_path.exists() and append_if_exists:
+        existing_df = pd.read_excel(output_path, engine="openpyxl")
+        new_df = pd.concat([existing_df, pd.DataFrame(rows_to_write)], ignore_index=True)
+        new_df.drop_duplicates(subset=["maps_url"], inplace=True)
+        new_df.to_excel(output_path, index=False, engine="openpyxl")
+    else:
+        pd.DataFrame(rows_to_write).to_excel(output_path, index=False, engine="openpyxl")
+
+    print(f"\n💾 Saved {len(rows_to_write)} new records → {path}")
+
+
+def save_results(results: list[Property], path: str, append_if_exists: bool = True):
+    if str(path).lower().endswith(".xlsx"):
+        save_excel(results, path, append_if_exists=append_if_exists)
+    else:
+        save_csv(results, path, append_if_exists=append_if_exists)
+
+
 def save_json(results: list[Property], path: str):
     with open(path, "w", encoding="utf-8") as f:
         json.dump([asdict(r) for r in results], f, indent=2)
@@ -285,7 +370,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Google Maps Property Scraper")
     parser.add_argument("--query", "-q", required=True, help='Search query e.g. "apartments Orange County CA"')
     parser.add_argument("--max", "-m", type=int, default=50, help="Max listings to scrape (default: 50)")
-    parser.add_argument("--output", "-o", default="", help="Output CSV filename (default: auto-named)")
+    parser.add_argument("--output", "-o", default="", help="Output filename (.xlsx or .csv) (default: auto-named)")
     parser.add_argument("--no-email", action="store_true", help="Skip email fetching (faster)")
     parser.add_argument("--visible", action="store_true", help="Run browser in visible mode (non-headless)")
     parser.add_argument("--json", action="store_true", help="Also save a JSON file")
@@ -301,11 +386,14 @@ async def main():
     print_table(results)
 
     # Auto-name output file from query
-    output_csv = args.output or args.query.replace(" ", "_").replace('"', "") + ".csv"
-    save_csv(results, output_csv)
+    output_file = args.output or args.query.replace(" ", "_").replace('"', "") + ".xlsx"
+    save_results(results, output_file)
 
     if args.json:
-        save_json(results, output_csv.replace(".csv", ".json"))
+        json_path = output_file
+        if json_path.lower().endswith(".xlsx"):
+            json_path = json_path[:-5] + ".json"
+        save_json(results, json_path)
 
 
 if __name__ == "__main__":
