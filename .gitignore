@@ -1,2 +1,5 @@
 # Ignore generated output files
 *.csv
+*.xls
+*.xlsx
+~$*
