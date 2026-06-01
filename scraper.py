@@ -40,6 +40,10 @@ class Property:
     category: str = ""
 
 
+def _normalize_property_name(name: str) -> str:
+    return re.sub(r"\s+", " ", (name or "").strip().lower())
+
+
 # ─────────────────────────────────────────────
 # Email extraction from websites
 # ─────────────────────────────────────────────
@@ -95,33 +99,6 @@ class GoogleMapsScraper:
             return ""
         return re.sub(r"^[^:]+:\s*", "", value).strip()
 
-    @staticmethod
-    def _translate_category(category: str) -> str:
-        """Translate common Swahili category terms to English."""
-        translations = {
-            "Ghorofa yenye Vyumba": "Apartments",
-            "Mafundi": "Contractors",
-            "Maduka": "Shops",
-            "Hoteli": "Hotels",
-            "Migahawa": "Restaurants",
-            "Hospitali": "Hospitals",
-            "Shule": "Schools",
-            "Benki": "Banks",
-            "Kituo cha posta": "Post Office",
-            "Kituo cha polisi": "Police Station",
-            "Jumba la biashara": "Commercial Building",
-            "Ofisi": "Office",
-            "Maktaba": "Library",
-            "Kituo cha afya": "Health Center",
-            "Kituo cha michezo": "Sports Center",
-            "Duka la vifaa": "Hardware Store",
-            "Duka la chakula": "Grocery Store",
-            "Kituo cha mafuta": "Gas Station",
-            "Kituo cha usafiri": "Transportation Hub",
-            "Kituo cha burudani": "Entertainment Center",
-        }
-        return translations.get(category.strip(), category.strip())
-
     async def _scroll_results(self, page: Page, max_results: int):
         """Scroll the results panel to load more listings."""
         scrollable = page.locator('div[role="feed"]')
@@ -159,7 +136,6 @@ class GoogleMapsScraper:
         # Category
         try:
             data["category"] = await page.locator('button[jsaction*="category"]').first.inner_text(timeout=2000)
-            data["category"] = self._translate_category(data["category"])
         except PlaywrightTimeout:
             data["category"] = ""
 
@@ -204,11 +180,11 @@ class GoogleMapsScraper:
             )
             page = await context.new_page()
 
-            print(f"\n🗺  Searching Google Maps: '{query}'")
+            print(f"\nSearching Google Maps: '{query}'")
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             except PlaywrightTimeout:
-                print("⚠  Page load timed out after 60s; continuing with partially loaded content.")
+                print("Page load timed out after 60s; continuing with partially loaded content.")
             await asyncio.sleep(3)
 
             # Handle consent popup if present
@@ -220,13 +196,13 @@ class GoogleMapsScraper:
             except Exception:
                 pass
 
-            print(f"📜 Scrolling to collect up to {max_results} listings...")
+            print(f" Scrolling to collect up to {max_results} listings...")
             await self._scroll_results(page, max_results)
 
             # Collect all listing links
             listing_links = await page.locator('a[href*="/maps/place/"]').all()
             listing_links = listing_links[:max_results]
-            print(f"\n✅ Found {len(listing_links)} listings. Extracting details...\n")
+            print(f"\n Found {len(listing_links)} listings. Extracting details...\n")
 
             for i, link in enumerate(listing_links, 1):
                 try:
@@ -260,11 +236,11 @@ class GoogleMapsScraper:
 
 def save_csv(results: list[Property], path: str, append_if_exists: bool = True):
     if not results:
-        print("⚠  No results to save.")
+        print("No results to save.")
         return
 
     output_path = Path(path)
-    existing_urls = set()
+    existing_names = set()
     write_header = not output_path.exists()
     mode = "w"
 
@@ -272,19 +248,23 @@ def save_csv(results: list[Property], path: str, append_if_exists: bool = True):
         mode = "a"
         with output_path.open("r", newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
-            existing_urls = {row.get("maps_url", "").strip() for row in reader if row.get("maps_url", "").strip()}
+            existing_names = {
+                _normalize_property_name(row.get("name", ""))
+                for row in reader
+                if row.get("name", "")
+            }
 
     rows_to_write = []
-    seen_urls = set(existing_urls)
+    seen_names = set(existing_names)
     for result in results:
-        url = result.maps_url.strip()
-        if not url or url in seen_urls:
+        name = _normalize_property_name(result.name)
+        if not name or name in seen_names:
             continue
         rows_to_write.append(asdict(result))
-        seen_urls.add(url)
+        seen_names.add(name)
 
     if not rows_to_write:
-        print("⚠  No new records to save; existing file already contains these listings.")
+        print("No new records to save; existing file already contains these listings.")
         return
 
     with output_path.open(mode, newline="", encoding="utf-8") as f:
@@ -293,49 +273,50 @@ def save_csv(results: list[Property], path: str, append_if_exists: bool = True):
             writer.writeheader()
         writer.writerows(rows_to_write)
 
-    print(f"\n💾 Saved {len(rows_to_write)} new records → {path}")
+    print(f"\nSaved {len(rows_to_write)} new records to {path}")
 
 
 def save_excel(results: list[Property], path: str, append_if_exists: bool = True):
     if not results:
-        print("⚠  No results to save.")
+        print("No results to save.")
         return
 
     output_path = Path(path)
     rows = [asdict(result) for result in results]
     df = pd.DataFrame(rows)
 
-    existing_urls = set()
+    existing_names = set()
     if append_if_exists and output_path.exists():
         existing_df = pd.read_excel(output_path, engine="openpyxl")
-        existing_urls = {
-            str(value).strip()
-            for value in existing_df.get("maps_url", pd.Series(dtype="string")).fillna("")
+        existing_names = {
+            _normalize_property_name(str(value))
+            for value in existing_df.get("name", pd.Series(dtype="string")).fillna("")
             if str(value).strip()
         }
 
     rows_to_write = []
-    seen_urls = set(existing_urls)
+    seen_names = set(existing_names)
     for row in rows:
-        url = str(row.get("maps_url", "")).strip()
-        if not url or url in seen_urls:
+        name = _normalize_property_name(str(row.get("name", "")))
+        if not name or name in seen_names:
             continue
         rows_to_write.append(row)
-        seen_urls.add(url)
+        seen_names.add(name)
 
     if not rows_to_write:
-        print("⚠  No new records to save; existing file already contains these listings.")
+        print("No new records to save; existing file already contains these listings.")
         return
 
     if output_path.exists() and append_if_exists:
         existing_df = pd.read_excel(output_path, engine="openpyxl")
         new_df = pd.concat([existing_df, pd.DataFrame(rows_to_write)], ignore_index=True)
-        new_df.drop_duplicates(subset=["maps_url"], inplace=True)
+        new_df["__normalized_name"] = new_df["name"].fillna("").astype(str).str.strip().str.lower().str.replace(r"\s+", " ", regex=True)
+        new_df = new_df.drop_duplicates(subset=["__normalized_name"]).drop(columns=["__normalized_name"]).reset_index(drop=True)
         new_df.to_excel(output_path, index=False, engine="openpyxl")
     else:
         pd.DataFrame(rows_to_write).to_excel(output_path, index=False, engine="openpyxl")
 
-    print(f"\n💾 Saved {len(rows_to_write)} new records → {path}")
+    print(f"\nSaved {len(rows_to_write)} new records to {path}")
 
 
 def save_results(results: list[Property], path: str, append_if_exists: bool = True):
@@ -348,7 +329,7 @@ def save_results(results: list[Property], path: str, append_if_exists: bool = Tr
 def save_json(results: list[Property], path: str):
     with open(path, "w", encoding="utf-8") as f:
         json.dump([asdict(r) for r in results], f, indent=2)
-    print(f"💾 Saved JSON → {path}")
+    print(f"Saved JSON to {path}")
 
 
 def print_table(results: list[Property]):
