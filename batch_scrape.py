@@ -42,7 +42,7 @@ async def batch_scrape(max_per_query: int = 30, output: str = "orange_county_lea
 
     print_table(all_results)
     save_results(all_results, output)
-    print(f"\n🎉 Done! {len(all_results)} unique properties saved to {output}")
+    print(f"\nDone! {len(all_results)} unique properties saved to {output}")
 
 
 async def main():
